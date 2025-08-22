@@ -1,0 +1,5 @@
+service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date
+250728-MULTI-Weekday-01,1,1,1,1,1,0,0,20250728,20250829
+250728-MULTI-Saturday-01,0,0,0,0,0,1,0,20250802,20250830
+250728-MULTI-Sunday-01,0,0,0,0,0,0,1,20250803,20250831
+250728-MULTI-Holiday1-01,1,1,1,1,1,1,1,20250804,20250804

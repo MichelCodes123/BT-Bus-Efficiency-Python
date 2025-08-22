@@ -1,0 +1,264 @@
+import requests
+import json, datetime
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
+from time import localtime, strftime
+from dotenv import load_dotenv
+import os
+import asyncio
+import time
+import psycopg2
+import re
+import logging
+from pprint import pformat
+
+load_dotenv()
+
+
+def getConnection():
+    try:
+        return psycopg2.connect(
+            database=os.getenv("DB_NAME"),
+            user=os.getenv("USER_NAME"),
+            password=os.getenv("PASS"),
+            host=os.getenv("HOST_NAME"),
+            port=os.getenv("PORT_NUM"),
+        )
+
+    except:
+        "Error"
+        return False
+
+
+def delay_calc(current_time: str, scheduled_arrival: str) -> int:
+    hour_current = int(current_time[0:2])
+    hour_sched = int(scheduled_arrival[0:2])
+
+    if hour_current - hour_sched < 0:
+        return -1
+
+    ## Bus may be delayed or exactly on time.
+    delay = (
+        ((hour_current - hour_sched) * 60 * 60)
+        + (int(current_time[3:5]) - int(scheduled_arrival[3:5])) * 60
+        + (int(current_time[6:8]) - int(scheduled_arrival[6:8]))
+    )
+
+    if delay > 0:
+        return delay
+
+    return -1
+
+
+def convert_time_past_twelve(time: str) -> str:
+    """
+    Brampton Transit's GTFS data recognizes 24, 25,26, and 27, as scheduled arrival times at 12,1,2 and 3am.
+
+    Ex. If the current time is 3am, and a bus is scheduled for this time, then the scheduled arrival time would be 27:00:00. This function converts the current time to match that format so I can still compare the times, and calculate a delay.
+
+    """
+
+    if int(time[0:2]) < 4:
+        return str(int(time[0:2]) + 24) + ":" + time[3:5] + ":" + time[6:8]
+    return time
+
+
+def get_current_time() -> str:
+    """
+    Returns the current time in Toronto (same as Brampton). Wherever this script will run, it will always give accurate times.
+    Unsure about how daylight savings works with this method though... find out
+
+    """
+
+    Toronto = ZoneInfo("America/Toronto")
+    time = datetime.now(Toronto)
+    currTime = f"{time.hour:02d}:{time.minute:02d}:{time.second:2d}"
+    return currTime
+
+
+def get_yesterday_date() -> str:
+    Toronto = ZoneInfo("America/Toronto")
+    time = datetime.now(Toronto)
+    return (time - timedelta(1)).strftime("%Y-%m-%d")
+
+
+def calculate_penalty(minutes_delayed: int) -> int:
+    if minutes_delayed > 30:
+        return 0
+    elif minutes_delayed > 20:
+        return 1
+    elif minutes_delayed > 15:
+        return 2
+    elif minutes_delayed > 10:
+        return 3
+    elif minutes_delayed > 3:
+        return 4
+    else:
+        return 5
+
+
+def print_delay(x, totalDelay: int, scheduled_time: str, bus: str, penalty):
+    if totalDelay > 0:
+        print(
+            "This bus is delayed by "
+            + str(int(totalDelay / 60))
+            + " minutes and "
+            + str(totalDelay % 60)
+            + " seconds. Penalty is "
+            + str(penalty)
+        )
+        print(
+            "The bus "
+            + bus
+            + ", corresponding to trip "
+            + x["vehicle"]["trip"]["trip_id"]
+            + " should arrive at "
+            + scheduled_time
+        )
+        print("\n")
+
+
+# Create function to make sure the api query is the correct trip id
+
+
+## Remove special characters for bus names
+def calculate_daily_penalty(penalty_log: dict):
+    """
+    Penalty log format: Bus name : {stop : {arrival: penalty }}
+
+    """
+
+    conn = getConnection()
+    curr = conn.cursor()
+
+    # Logs to be reviewed for accuracy
+    logging.basicConfig(filename="records.log", level=logging.INFO)
+    logging.getLogger("").info(pformat(penalty_log))
+
+    for bus_name in penalty_log:
+        for stop in penalty_log.get(bus_name):
+            sum = 0
+
+            for penalty in penalty_log.get(bus_name).get(stop).values():
+                sum += penalty
+            stop_daily_avg = sum / len(penalty_log.get(bus_name).get(stop).values())
+            record_date = get_yesterday_date()
+
+            curr.execute(
+                """INSERT into daily_penalty_records (stop_id, bus_name, record_date, penalty) VALUES (%s,%s,%s,%s);""",
+                (
+                    stop,
+                    " ".join(re.sub(r"[/\-\.]", " ", bus_name).split()),
+                    record_date,
+                    stop_daily_avg,
+                ),
+            )
+        conn.commit()
+    curr.close()
+    conn.close()
+
+    # Set up logger
+
+
+def update_delay(data2, tripTORoute, penalty_system):
+
+    url = os.getenv("BT_API")
+    response = requests.get(url)
+    data = json.loads(response.text)
+    resp = data.get("entity")
+
+    if resp != None:
+        for x in resp:
+
+            # Skip loop bus routes, for now
+            bus_key = tripTORoute.get(x.get("vehicle").get("trip").get("trip_id"))
+            if "LOOP" in bus_key:
+                continue
+
+            # Key -> TripID,StopID
+            key = (
+                x.get("vehicle").get("trip").get("trip_id")
+                + ","
+                + x.get("vehicle").get("stop_id")
+            )
+
+            scheduled_time = data2.get(key)
+
+            ## There may be buses scheduled that are not shown in the GTFS data, therefore no scheduled time would show up.
+            if scheduled_time == None:
+                continue
+
+            # If the sheduled times are into the next day
+            if int(scheduled_time[0:2]) > 23:
+                currentTime = convert_time_past_twelve(get_current_time())
+
+            totalDelay = -1
+            ##Verify that "STOPPED_AT", only means stopped at the right stop and not just stopped anywhere else
+
+            # Current status field may be missing in place of "current_stop_sequence". Assume presence of "current_stop_sequence" still implies vehicle is in transit.
+            if (
+                x.get("vehicle").get("current_status") == "IN_TRANSIT_TO"
+                or x.get("vehicle").get("current_stop_sequence") != None
+            ):
+                totalDelay = delay_calc(currentTime, scheduled_time)
+
+            penalty = calculate_penalty(int(totalDelay / 60))
+
+            # Bus name : {stop : {arrival: penalty }}
+            stop_key = x.get("vehicle").get("stop_id")
+
+            if penalty_system.get(bus_key) == None:
+                penalty_system[bus_key] = {stop_key: {scheduled_time: penalty}}
+            else:
+                if (penalty_system.get(bus_key).get(stop_key)) == None:
+                    penalty_system[bus_key][stop_key] = {scheduled_time: penalty}
+                else:
+                    penalty_system[bus_key][stop_key][scheduled_time] = penalty
+
+            print_delay(
+                x,
+                totalDelay,
+                scheduled_time,
+                x.get("vehicle").get("trip").get("route_id"),
+                penalty,
+            )
+
+
+# JSON Format -> TripID,StopID : scheduluedArrivalTime
+with open("GTFSMappings/stop_times.json", "r") as fp:
+    data2 = json.load(fp)
+
+# JSON Format -> TripID : Bus Route Name
+with open("GTFSMappings/tripTo_route.json", "r") as fp:
+    tripTORoute = json.load(fp)
+
+penalty_system = {}
+
+
+async def my_task(data2, tripTORoute, penalty_system):
+    delay = 0
+    totalRunning = 0
+
+    startTime = time.perf_counter()
+
+    update_delay(data2, tripTORoute, penalty_system)
+
+    totalRunning = time.perf_counter() - startTime
+
+    if totalRunning > 60:
+        delay = 0
+    else:
+        delay = int(totalRunning)
+
+    await asyncio.sleep(delay)
+
+
+##Run every minute for 24 hours
+async def main(data2, tripTORoute, penalty_system):
+    for i in range(1440):
+        await my_task(data2, tripTORoute, penalty_system)
+
+    calculate_daily_penalty(penalty_system)
+
+
+asyncio.run(main(data2, tripTORoute, penalty_system))
