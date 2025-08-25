@@ -118,6 +118,20 @@ def print_delay(x, totalDelay: int, scheduled_time: str, bus: str, penalty):
         print("\n")
 
 
+def removeLastRecord(stop_id, bus_name, curr, conn):
+    curr.execute(
+        "SELECT from daily_penalty_records WHERE stop_id = %s and bus_name = %s;" "",
+        (stop_id, bus_name),
+    )
+    numrows = curr.rowcount
+    if numrows > 7:
+        curr.execute(
+            """WITH get_recent AS (SELECT * FROM daily_penalty_records Where stop_id = %s and bus_name = %s order by record_date ASC limit 1) DELETE FROM daily_penalty_records as x USING get_recent as y WHERE x.stop_id = y.stop_id and x.bus_name = y.bus_name and x.record_date = y.record_date;""",
+            (stop_id, bus_name),
+        )
+        conn.commit()
+
+
 # Create function to make sure the api query is the correct trip id
 
 
@@ -136,18 +150,20 @@ def calculate_daily_penalty(penalty_log: dict):
     logging.getLogger("").info(pformat(penalty_log))
 
     for bus_name in penalty_log:
-        for stop in penalty_log.get(bus_name):
+        for stop_id in penalty_log.get(bus_name):
             sum = 0
 
-            for penalty in penalty_log.get(bus_name).get(stop).values():
+            for penalty in penalty_log.get(bus_name).get(stop_id).values():
                 sum += penalty
-            stop_daily_avg = sum / len(penalty_log.get(bus_name).get(stop).values())
+            stop_daily_avg = sum / len(penalty_log.get(bus_name).get(stop_id).values())
             record_date = get_yesterday_date()
+
+            removeLastRecord(stop_id, bus_name, curr)
 
             curr.execute(
                 """INSERT into daily_penalty_records (stop_id, bus_name, record_date, penalty) VALUES (%s,%s,%s,%s);""",
                 (
-                    stop,
+                    stop_id,
                     " ".join(re.sub(r"[/\-\.]", " ", bus_name).split()),
                     record_date,
                     stop_daily_avg,
@@ -188,9 +204,10 @@ def update_delay(data2, tripTORoute, penalty_system):
             if scheduled_time == None:
                 continue
 
+            currentTime = get_current_time()
             # If the sheduled times are into the next day
             if int(scheduled_time[0:2]) > 23:
-                currentTime = convert_time_past_twelve(get_current_time())
+                currentTime = convert_time_past_twelve(currentTime)
 
             totalDelay = -1
             ##Verify that "STOPPED_AT", only means stopped at the right stop and not just stopped anywhere else
