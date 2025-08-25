@@ -158,7 +158,7 @@ def calculate_daily_penalty(penalty_log: dict):
             stop_daily_avg = sum / len(penalty_log.get(bus_name).get(stop_id).values())
             record_date = get_yesterday_date()
 
-            removeLastRecord(stop_id, bus_name, curr)
+            removeLastRecord(stop_id, bus_name, curr, conn)
 
             curr.execute(
                 """INSERT into daily_penalty_records (stop_id, bus_name, record_date, penalty) VALUES (%s,%s,%s,%s);""",
@@ -188,8 +188,6 @@ def update_delay(data2, tripTORoute, penalty_system):
 
             # Skip loop bus routes, for now
             bus_key = tripTORoute.get(x.get("vehicle").get("trip").get("trip_id"))
-            if "LOOP" in bus_key:
-                continue
 
             # Key -> TripID,StopID
             key = (
@@ -202,6 +200,9 @@ def update_delay(data2, tripTORoute, penalty_system):
 
             ## There may be buses scheduled that are not shown in the GTFS data, therefore no scheduled time would show up.
             if scheduled_time == None:
+                continue
+
+            if "LOOP" in bus_key:
                 continue
 
             currentTime = get_current_time()
@@ -265,7 +266,7 @@ async def my_task(data2, tripTORoute, penalty_system):
     if totalRunning > 60:
         delay = 0
     else:
-        delay = int(totalRunning)
+        delay = 60 - int(totalRunning)
 
     await asyncio.sleep(delay)
 
