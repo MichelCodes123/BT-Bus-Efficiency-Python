@@ -3,6 +3,7 @@ import os
 import psycopg2
 from dotenv import load_dotenv
 import re
+import psycopg2.extras
 
 load_dotenv()
 
@@ -43,7 +44,7 @@ curr.execute(
 );"""
 )
 
-
+vals = []
 for bus_name in busTOstops:
     if "LOOP" in bus_name:
         continue
@@ -53,13 +54,16 @@ for bus_name in busTOstops:
 
         bus_name = " ".join(re.sub(r"[/\-\.]", " ", bus_name).split())
 
-        curr.execute(
-            """INSERT INTO bus_stops (stop_id, bus_name, stop_sequence, stop_name) VALUES (%s, %s, %s, %s);""",
-            (stop_id, bus_name, stop_sequence, stop_name),
-        )
-        conn.commit()
+        vals.append((stop_id, bus_name, stop_sequence, stop_name))
+
         stop_sequence = stop_sequence + 1
 
+
+psycopg2.extras.execute_batch(
+    curr,
+    "INSERT INTO bus_stops (stop_id, bus_name, stop_sequence, stop_name) VALUES (%s, %s, %s, %s);",
+    tuple(vals),
+)
 
 curr.close()
 conn.close()
