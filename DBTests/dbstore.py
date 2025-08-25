@@ -4,6 +4,7 @@ import psycopg2
 from dotenv import load_dotenv
 import re
 import psycopg2.extras
+import psycopg
 
 load_dotenv()
 
@@ -17,14 +18,13 @@ with open("GTFSMappings/stopsTo_stopname.json", "r") as fp:
 # Dont push this, use env key
 def getConnection():
     try:
-        return psycopg2.connect(
-            database=os.getenv("DB_NAME"),
+        return psycopg.connect(
+            dbname=os.getenv("DB_NAME"),
             user=os.getenv("USER_NAME"),
             password=os.getenv("PASS"),
             host=os.getenv("HOST_NAME"),
             port=os.getenv("PORT_NUM"),
         )
-
     except:
         "Error"
         return False
@@ -32,17 +32,6 @@ def getConnection():
 
 conn = getConnection()
 curr = conn.cursor()
-
-curr.execute("DROP Table bus_stops;")
-curr.execute(
-    """CREATE TABLE bus_stops(
-    stop_id varchar(10),
-    bus_name varchar(50),
-    stop_sequence smallint,
-    stop_name varchar (100),
-    PRIMARY KEY(stop_id, bus_name, stop_sequence)
-);"""
-)
 
 vals = []
 for bus_name in busTOstops:
@@ -58,12 +47,13 @@ for bus_name in busTOstops:
 
         stop_sequence = stop_sequence + 1
 
+with curr.copy(
+    "COPY bus_stops (stop_id, bus_name, stop_sequence, stop_name) FROM STDIN"
+) as copy:
+    for val in vals:
+        copy.write_row(val)
 
-psycopg2.extras.execute_batch(
-    curr,
-    "INSERT INTO bus_stops (stop_id, bus_name, stop_sequence, stop_name) VALUES (%s, %s, %s, %s);",
-    tuple(vals),
-)
+conn.commit()
 
 curr.close()
 conn.close()
