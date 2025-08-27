@@ -1,6 +1,8 @@
 certifi==2025.8.3
 charset-normalizer==3.4.3
 idna==3.10
+psycopg==3.2.9
+psycopg-binary==3.2.9
 psycopg2-binary==2.9.10
 python-dotenv==1.1.1
 requests==2.32.5

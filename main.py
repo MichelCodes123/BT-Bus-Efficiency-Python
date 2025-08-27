@@ -1,13 +1,12 @@
 import requests
 import json, datetime
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from time import localtime, strftime
 from dotenv import load_dotenv
 import os
 import asyncio
 import time
-import psycopg2
+import psycopg
 import re
 import logging
 from pprint import pformat
@@ -15,10 +14,21 @@ from pprint import pformat
 load_dotenv()
 
 
+def setup_logger(name, log_file, level):
+
+    handler = logging.FileHandler(log_file)
+
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    logger.addHandler(handler)
+
+    return logger
+
+
 def getConnection():
     try:
-        return psycopg2.connect(
-            database=os.getenv("DB_NAME"),
+        return psycopg.connect(
+            dbname=os.getenv("DB_NAME"),
             user=os.getenv("USER_NAME"),
             password=os.getenv("PASS"),
             host=os.getenv("HOST_NAME"),
@@ -118,7 +128,10 @@ def print_delay(x, totalDelay: int, scheduled_time: str, bus: str, penalty):
         print("\n")
 
 
-def removeLastRecord(stop_id, bus_name, curr, conn):
+def remove_earliest_record(stop_id, bus_name, curr, conn):
+    """
+    No need to continuously store more than 8 records for a given stop. Remove the earliest
+    """
     curr.execute(
         "SELECT from daily_penalty_records WHERE stop_id = %s and bus_name = %s;" "",
         (stop_id, bus_name),
@@ -142,104 +155,127 @@ def calculate_daily_penalty(penalty_log: dict):
 
     """
 
+    Toronto = ZoneInfo("America/Toronto")
+    time = datetime.now(Toronto)
+    
+
     conn = getConnection()
-    curr = conn.cursor()
+    if conn != False:
+        curr = conn.cursor()
+        vals = []
+        
+        #Record Log
+        dlog = setup_logger("dlog", "records.log", 20)
+        dlog.info(time.strftime("%Y-%m-%d"))
+        dlog.info(pformat(penalty_log))
 
-    # Logs to be reviewed for accuracy
-    logging.basicConfig(filename="records.log", level=logging.INFO)
-    logging.getLogger("").info(pformat(penalty_log))
+        for bus_name in penalty_log:
+            for stop_id in penalty_log.get(bus_name):
+                sum = 0
 
-    for bus_name in penalty_log:
-        for stop_id in penalty_log.get(bus_name):
-            sum = 0
+                for penalty in penalty_log.get(bus_name).get(stop_id).values():
+                    sum += penalty
 
-            for penalty in penalty_log.get(bus_name).get(stop_id).values():
-                sum += penalty
-            stop_daily_avg = sum / len(penalty_log.get(bus_name).get(stop_id).values())
-            record_date = get_yesterday_date()
+                stop_daily_avg = sum / len(
+                    penalty_log.get(bus_name).get(stop_id).values()
+                )
+                record_date = get_yesterday_date()
 
-            removeLastRecord(stop_id, bus_name, curr, conn)
+                remove_earliest_record(stop_id, bus_name, curr, conn)
+                vals.append(
+                    (
+                        stop_id,
+                        " ".join(re.sub(r"[/\-\.]", " ", bus_name).split()),
+                        record_date,
+                        stop_daily_avg,
+                    )
+                )
 
-            curr.execute(
-                """INSERT into daily_penalty_records (stop_id, bus_name, record_date, penalty) VALUES (%s,%s,%s,%s);""",
-                (
-                    stop_id,
-                    " ".join(re.sub(r"[/\-\.]", " ", bus_name).split()),
-                    record_date,
-                    stop_daily_avg,
-                ),
-            )
+        with curr.copy(
+            "COPY daily_penalty_records (stop_id, bus_name, record_date, penalty) FROM STDIN"
+        ) as copy:
+            for val in vals:
+                copy.write_row(val)
         conn.commit()
-    curr.close()
-    conn.close()
 
-    # Set up logger
+        curr.close()
+        conn.close()
+    else:
+        dblog = setup_logger("dblog", "error.log", 40)
+        dblog.error("Database connection not found")
 
 
 def update_delay(data2, tripTORoute, penalty_system):
+
+    Toronto = ZoneInfo("America/Toronto")
+    time = datetime.now(Toronto)
+
+    elog = setup_logger("elog", "error.log", 40)
+    elog.error(time.strftime("%Y-%m-%d"))
 
     url = os.getenv("BT_API")
     response = requests.get(url)
     data = json.loads(response.text)
     resp = data.get("entity")
 
-    if resp != None:
+    if resp != None and isinstance(resp, list):
         for x in resp:
+            try:
+                trip_id = x.get("vehicle").get("trip").get("trip_id")
+                bus_key = tripTORoute.get(trip_id)
+                stop_id = x.get("vehicle").get("stop_id")
+                transit_status = x.get("vehicle").get("current_status")
+                stop_sequence = x.get("vehicle").get("current_stop_sequence")
 
-            # Skip loop bus routes, for now
-            bus_key = tripTORoute.get(x.get("vehicle").get("trip").get("trip_id"))
+                # Key -> TripID,StopID
+                if bus_key == None or trip_id == None or stop_id == None:
+                    elog.error("The bus key or trip id or stop id is invalid:")
+                    elog.error(pformat(x))
+                    elog.info("\n")
+                    continue
 
-            # Key -> TripID,StopID
-            key = (
-                x.get("vehicle").get("trip").get("trip_id")
-                + ","
-                + x.get("vehicle").get("stop_id")
-            )
+                key = trip_id + "," + stop_id
+                scheduled_time = data2.get(key)
 
-            scheduled_time = data2.get(key)
+                if scheduled_time == None:
+                    elog.info(
+                        "No scheduled time for specific trip, and stop. Not in GTFS data:"
+                    )
+                    elog.info(pformat(x))
+                    elog.info("\n")
+                    continue
 
-            ## There may be buses scheduled that are not shown in the GTFS data, therefore no scheduled time would show up.
-            if scheduled_time == None:
-                continue
+                if "LOOP" in bus_key:
+                    continue
 
-            if "LOOP" in bus_key:
-                continue
+                currentTime = get_current_time()
+                # If the sheduled times are into the next day
+                if int(scheduled_time[0:2]) > 23:
+                    currentTime = convert_time_past_twelve(currentTime)
 
-            currentTime = get_current_time()
-            # If the sheduled times are into the next day
-            if int(scheduled_time[0:2]) > 23:
-                currentTime = convert_time_past_twelve(currentTime)
+                totalDelay = -1
 
-            totalDelay = -1
-            ##Verify that "STOPPED_AT", only means stopped at the right stop and not just stopped anywhere else
+                # Current status field may be missing in place of "current_stop_sequence". Assume presence of "current_stop_sequence" still implies vehicle is in transit.
+                if transit_status == "IN_TRANSIT_TO" or stop_sequence != None:
+                    totalDelay = delay_calc(currentTime, scheduled_time)
 
-            # Current status field may be missing in place of "current_stop_sequence". Assume presence of "current_stop_sequence" still implies vehicle is in transit.
-            if (
-                x.get("vehicle").get("current_status") == "IN_TRANSIT_TO"
-                or x.get("vehicle").get("current_stop_sequence") != None
-            ):
-                totalDelay = delay_calc(currentTime, scheduled_time)
+                penalty = calculate_penalty(int(totalDelay / 60))
 
-            penalty = calculate_penalty(int(totalDelay / 60))
+                # Bus name : {stop : {arrival: penalty }}
+                stop_key = stop_id
 
-            # Bus name : {stop : {arrival: penalty }}
-            stop_key = x.get("vehicle").get("stop_id")
-
-            if penalty_system.get(bus_key) == None:
-                penalty_system[bus_key] = {stop_key: {scheduled_time: penalty}}
-            else:
-                if (penalty_system.get(bus_key).get(stop_key)) == None:
-                    penalty_system[bus_key][stop_key] = {scheduled_time: penalty}
+                if penalty_system.get(bus_key) == None:
+                    penalty_system[bus_key] = {stop_key: {scheduled_time: penalty}}
                 else:
-                    penalty_system[bus_key][stop_key][scheduled_time] = penalty
+                    if (penalty_system.get(bus_key).get(stop_key)) == None:
+                        penalty_system[bus_key][stop_key] = {scheduled_time: penalty}
+                    else:
+                        penalty_system[bus_key][stop_key][scheduled_time] = penalty
 
-            print_delay(
-                x,
-                totalDelay,
-                scheduled_time,
-                x.get("vehicle").get("trip").get("route_id"),
-                penalty,
-            )
+            except Exception as e:
+                elog.info(e)
+                elog.info(pformat(x))
+                elog.info("\n")
 
 
 # JSON Format -> TripID,StopID : scheduluedArrivalTime
