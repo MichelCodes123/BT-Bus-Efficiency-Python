@@ -157,16 +157,15 @@ def calculate_daily_penalty(penalty_log: dict):
 
     Toronto = ZoneInfo("America/Toronto")
     time = datetime.now(Toronto)
-    
 
     conn = getConnection()
     if conn != False:
         curr = conn.cursor()
         vals = []
-        
-        #Record Log
+
+        # Record Log
         dlog = setup_logger("dlog", "records.log", 20)
-        dlog.info(time.strftime("%Y-%m-%d"))
+        dlog.info(time.strftime("%Y-%m-%d")+ " " + time.strftime("%H-%M-%S"))
         dlog.info(pformat(penalty_log))
 
         for bus_name in penalty_log:
@@ -205,13 +204,13 @@ def calculate_daily_penalty(penalty_log: dict):
         dblog.error("Database connection not found")
 
 
-def update_delay(data2, tripTORoute, penalty_system):
+def update_delay(data2, tripTORoute, penalty_system, elog):
 
     Toronto = ZoneInfo("America/Toronto")
     time = datetime.now(Toronto)
 
-    elog = setup_logger("elog", "error.log", 40)
-    elog.error(time.strftime("%Y-%m-%d"))
+    elog.error(time.strftime("%Y-%m-%d") + " " + time.strftime("%H-%M-%S"))
+   
 
     url = os.getenv("BT_API")
     response = requests.get(url)
@@ -238,11 +237,6 @@ def update_delay(data2, tripTORoute, penalty_system):
                 scheduled_time = data2.get(key)
 
                 if scheduled_time == None:
-                    elog.info(
-                        "No scheduled time for specific trip, and stop. Not in GTFS data:"
-                    )
-                    elog.info(pformat(x))
-                    elog.info("\n")
                     continue
 
                 if "LOOP" in bus_key:
@@ -289,13 +283,15 @@ with open("GTFSMappings/tripTo_route.json", "r") as fp:
 penalty_system = {}
 
 
-async def my_task(data2, tripTORoute, penalty_system):
+elog = setup_logger("elog", "error.log", 40)
+
+async def my_task(data2, tripTORoute, penalty_system, elog):
     delay = 0
     totalRunning = 0
 
     startTime = time.perf_counter()
 
-    update_delay(data2, tripTORoute, penalty_system)
+    update_delay(data2, tripTORoute, penalty_system, elog)
 
     totalRunning = time.perf_counter() - startTime
 
@@ -308,11 +304,11 @@ async def my_task(data2, tripTORoute, penalty_system):
 
 
 ##Run every minute for 24 hours
-async def main(data2, tripTORoute, penalty_system):
+async def main(data2, tripTORoute, penalty_system, elog):
     for i in range(1440):
-        await my_task(data2, tripTORoute, penalty_system)
+        await my_task(data2, tripTORoute, penalty_system, elog)
 
     calculate_daily_penalty(penalty_system)
 
 
-asyncio.run(main(data2, tripTORoute, penalty_system))
+asyncio.run(main(data2, tripTORoute, penalty_system, elog))
