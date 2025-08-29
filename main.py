@@ -149,7 +149,7 @@ def remove_earliest_record(stop_id, bus_name, curr, conn):
 
 
 ## Remove special characters for bus names
-def calculate_daily_penalty(penalty_log: dict):
+def calculate_daily_penalty(penalty_log: dict, elog):
     """
     Penalty log format: Bus name : {stop : {arrival: penalty }}
 
@@ -165,7 +165,7 @@ def calculate_daily_penalty(penalty_log: dict):
 
         # Record Log
         dlog = setup_logger("dlog", "records.log", 20)
-        dlog.info(time.strftime("%Y-%m-%d")+ " " + time.strftime("%H-%M-%S"))
+        dlog.info(time.strftime("%Y-%m-%d") + " " + time.strftime("%H-%M-%S"))
         dlog.info(pformat(penalty_log))
 
         for bus_name in penalty_log:
@@ -190,15 +190,19 @@ def calculate_daily_penalty(penalty_log: dict):
                     )
                 )
 
-        with curr.copy(
-            "COPY daily_penalty_records (stop_id, bus_name, record_date, penalty) FROM STDIN"
-        ) as copy:
-            for val in vals:
-                copy.write_row(val)
-        conn.commit()
+        try:
+            with curr.copy(
+                "COPY daily_penalty_records (stop_id, bus_name, record_date, penalty) FROM STDIN"
+            ) as copy:
+                for val in vals:
+                    copy.write_row(val)
+            conn.commit()
 
-        curr.close()
-        conn.close()
+            curr.close()
+            conn.close()
+        except Exception as e:
+            elog.error("Issue writing to database")
+            elog.error(e)
     else:
         dblog = setup_logger("dblog", "error.log", 40)
         dblog.error("Database connection not found")
@@ -210,12 +214,18 @@ def update_delay(data2, tripTORoute, penalty_system, elog):
     time = datetime.now(Toronto)
 
     elog.error(time.strftime("%Y-%m-%d") + " " + time.strftime("%H-%M-%S"))
-   
-
+    print(time.strftime("%Y-%m-%d") + " " + time.strftime("%H-%M-%S"))
     url = os.getenv("BT_API")
-    response = requests.get(url)
-    data = json.loads(response.text)
-    resp = data.get("entity")
+
+    try:
+        response = requests.get(url)
+        data = response.json()
+        resp = data.get("entity")
+
+    except Exception as e:
+        elog.error("Issue parsing response")
+        elog.error(e)
+        resp = None
 
     if resp != None and isinstance(resp, list):
         for x in resp:
@@ -285,6 +295,7 @@ penalty_system = {}
 
 elog = setup_logger("elog", "error.log", 40)
 
+
 async def my_task(data2, tripTORoute, penalty_system, elog):
     delay = 0
     totalRunning = 0
@@ -308,7 +319,7 @@ async def main(data2, tripTORoute, penalty_system, elog):
     for i in range(1440):
         await my_task(data2, tripTORoute, penalty_system, elog)
 
-    calculate_daily_penalty(penalty_system)
+    calculate_daily_penalty(penalty_system, elog)
 
 
 asyncio.run(main(data2, tripTORoute, penalty_system, elog))
